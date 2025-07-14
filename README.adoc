@@ -1,0 +1,442 @@
+= CloudBees action: Wait for Jira Status
+
+Use this action to wait for Jira issue(s) to reach a target status with configurable timeout and polling. Perfect for deployment approval gates, manual testing sign-offs, and workflow orchestration.
+
+== Inputs
+
+[cols="2a,2a,2a,5a",options="header"]
+.Input details
+|===
+
+| Input name
+| Data type
+| Required?
+| Description
+
+| `jira-url`
+| String
+| Yes
+| Jira instance URL (e.g., `https://your-domain.atlassian.net`)
+
+| `jira-username`
+| String
+| Yes
+| Jira username or email address for authentication
+
+| `jira-token`
+| String
+| Yes
+| Jira API token. Generate this in your Jira account settings under Security > API tokens
+
+| `issue-key`
+| String
+| No*
+| Single issue key to wait for (e.g., `PROJ-123`). Mutually exclusive with `jql`.
+
+| `jql`
+| String
+| No*
+| JQL query to find issues to wait for. Mutually exclusive with `issue-key`.
+
+| `target-status`
+| String
+| Yes
+| Target status name(s) to wait for. Comma-separated for multiple valid statuses (e.g., `"Done,Closed"`)
+
+| `timeout-minutes`
+| Number
+| No
+| Maximum time to wait in minutes before timing out. Default is `60`
+
+| `poll-interval-seconds`
+| Number
+| No
+| How often to check status in seconds. Default is `30`
+
+| `all-issues-must-match`
+| Boolean
+| No
+| If using JQL, whether ALL issues must reach target status (`true`) or just ANY (`false`). Default is `true`
+
+| `fail-on-timeout`
+| Boolean
+| No
+| Whether to fail the action when timeout is reached (`true`) or exit successfully (`false`). Default is `true`
+
+|===
+
+*Either `issue-key` OR `jql` must be provided, but not both.
+
+== Outputs
+
+[cols="2a,2a,5a",options="header"]
+.Output details
+|===
+
+| Output name
+| Data type
+| Description
+
+| `result`
+| String
+| Result of the wait: `'success'`, `'timeout'`, or `'error'`
+
+| `matched-issues`
+| JSON Array
+| Array of issues that reached the target status
+
+| `unmatched-issues`
+| JSON Array
+| Array of issues that did not reach the target status
+
+| `total-wait-time`
+| Number
+| Total time waited in seconds
+
+| `final-status-summary`
+| String
+| Human-readable summary of final statuses for all monitored issues
+
+|===
+
+== Usage Examples
+
+=== Basic Approval Gate - Single Issue
+
+[source,yaml]
+----
+- name: Create deployment approval issue
+  uses: ./jira-create-issue
+  id: approval
+  with:
+    jira-url: https://mycompany.atlassian.net
+    jira-username: ${{ secrets.JIRA_USERNAME }}
+    jira-token: ${{ secrets.JIRA_TOKEN }}
+    project-key: OPS
+    issue-type: Task
+    issue-fields: |
+      summary: "Approve deployment of ${{ github.ref_name }} to production"
+      description: |
+        Please review and approve this deployment:
+        
+        **Version:** ${{ github.ref_name }}
+        **Repository:** ${{ github.repository }}
+        **Commit:** ${{ github.sha }}
+        **Triggered by:** ${{ github.actor }}
+        
+        Move this issue to "Approved" status to proceed with deployment.
+      priority:
+        name: High
+
+- name: Wait for deployment approval
+  uses: ./jira-wait-for-status
+  id: wait-approval
+  with:
+    jira-url: https://mycompany.atlassian.net
+    jira-username: ${{ secrets.JIRA_USERNAME }}
+    jira-token: ${{ secrets.JIRA_TOKEN }}
+    issue-key: ${{ steps.approval.outputs.issue-key }}
+    target-status: "Approved"
+    timeout-minutes: 1440  # 24 hours
+    poll-interval-seconds: 60  # Check every minute
+
+- name: Deploy to production
+  if: steps.wait-approval.outputs.result == 'success'
+  run: |
+    echo "Deployment approved! Proceeding with production deployment..."
+    # Your deployment commands here
+----
+
+=== Multiple Issues - Testing Sign-off
+
+[source,yaml]
+----
+- name: Wait for all test issues to be completed
+  uses: ./jira-wait-for-status
+  id: wait-testing
+  with:
+    jira-url: https://mycompany.atlassian.net
+    jira-username: ${{ secrets.JIRA_USERNAME }}
+    jira-token: ${{ secrets.JIRA_TOKEN }}
+    jql: "project = QA AND fixVersion = '${{ github.ref_name }}' AND status != Done"
+    target-status: "Done,Closed"
+    timeout-minutes: 480  # 8 hours
+    poll-interval-seconds: 300  # Check every 5 minutes
+    all-issues-must-match: true
+
+- name: Show testing results
+  uses: docker://alpine:3.22
+  shell: sh
+  run: |
+    apk add --no-cache jq
+    echo "Testing wait result: ${{ steps.wait-testing.outputs.result }}"
+    echo "Total wait time: ${{ steps.wait-testing.outputs.total-wait-time }} seconds"
+    
+    if [ "${{ steps.wait-testing.outputs.result }}" = "success" ]; then
+      echo "✅ All testing issues completed!"
+      echo "Completed issues:"
+      echo '${{ steps.wait-testing.outputs.matched-issues }}' | jq -r '.[] | "  - \(.key): \(.fields.summary)"'
+    else
+      echo "⏰ Timeout reached. Some issues still pending:"
+      echo '${{ steps.wait-testing.outputs.unmatched-issues }}' | jq -r '.[] | "  - \(.key): \(.fields.status.name)"'
+    fi
+----
+
+=== Flexible Status Matching
+
+[source,yaml]
+----
+- name: Wait for code review completion
+  uses: ./jira-wait-for-status
+  with:
+    jira-url: https://mycompany.atlassian.net
+    jira-username: ${{ secrets.JIRA_USERNAME }}
+    jira-token: ${{ secrets.JIRA_TOKEN }}
+    jql: "project = DEV AND sprint in openSprints() AND status = 'Code Review'"
+    target-status: "Done,Merged,Approved,Ready for Testing"
+    timeout-minutes: 120  # 2 hours
+    poll-interval-seconds: 180  # Check every 3 minutes
+    all-issues-must-match: false  # Any issue completing is sufficient
+    fail-on-timeout: false       # Don't fail on timeout
+----
+
+=== Security Review Gate
+
+[source,yaml]
+----
+- name: Create security review issue
+  uses: ./jira-create-issue
+  id: security-review
+  with:
+    project-key: SEC
+    issue-type: "Security Review"
+    issue-fields: |
+      summary: "Security review for ${{ github.repository }} v${{ github.ref_name }}"
+      description: |
+        Security review required for production deployment.
+        
+        **Changes include:**
+        - New authentication flow
+        - Database schema changes
+        - External API integrations
+        
+        Please review and set status to "Security Approved" when complete.
+      priority:
+        name: High
+
+- name: Wait for security approval
+  uses: ./jira-wait-for-status
+  timeout-minutes: continue-on-error: true  # Don't fail the workflow
+  with:
+    issue-key: ${{ steps.security-review.outputs.issue-key }}
+    target-status: "Security Approved"
+    timeout-minutes: 720  # 12 hours
+    poll-interval-seconds: 300
+
+- name: Handle security review result
+  uses: docker://alpine:3.22
+  shell: sh
+  run: |
+    if [ "${{ steps.wait-security.outputs.result }}" = "success" ]; then
+      echo "✅ Security review approved - proceeding with deployment"
+    else
+      echo "⚠️ Security review not completed within timeout"
+      echo "Manual intervention required before deployment"
+      echo "Security review issue: ${{ steps.security-review.outputs.issue-url }}"
+      # Could create another issue, send notifications, etc.
+    fi
+----
+
+=== Release Coordination
+
+[source,yaml]
+----
+- name: Wait for release readiness
+  uses: ./jira-wait-for-status
+  id: release-ready
+  with:
+    jira-url: https://mycompany.atlassian.net
+    jira-username: ${{ secrets.JIRA_USERNAME }}
+    jira-token: ${{ secrets.JIRA_TOKEN }}
+    jql: |
+      project = REL AND fixVersion = '${{ github.ref_name }}' 
+      AND issuetype in (Epic, Story) 
+      AND status not in (Done, Closed, Cancelled)
+    target-status: "Done,Closed"
+    timeout-minutes: 2880  # 48 hours
+    poll-interval-seconds: 1800  # Check every 30 minutes
+    all-issues-must-match: true
+
+- name: Generate release report
+  if: always()
+  uses: docker://alpine:3.22
+  shell: sh
+  run: |
+    apk add --no-cache jq
+    
+    echo "# Release ${{ github.ref_name }} Status Report" > release-report.md
+    echo "" >> release-report.md
+    echo "**Wait Result:** ${{ steps.release-ready.outputs.result }}" >> release-report.md
+    echo "**Total Wait Time:** ${{ steps.release-ready.outputs.total-wait-time }} seconds" >> release-report.md
+    echo "" >> release-report.md
+    
+    COMPLETED_COUNT=$(echo '${{ steps.release-ready.outputs.matched-issues }}' | jq 'length')
+    PENDING_COUNT=$(echo '${{ steps.release-ready.outputs.unmatched-issues }}' | jq 'length')
+    
+    echo "## Summary" >> release-report.md
+    echo "- ✅ Completed: $COMPLETED_COUNT issues" >> release-report.md
+    echo "- ⏳ Pending: $PENDING_COUNT issues" >> release-report.md
+    echo "" >> release-report.md
+    
+    if [ "$PENDING_COUNT" -gt 0 ]; then
+      echo "## Issues Still Pending" >> release-report.md
+      echo '${{ steps.release-ready.outputs.unmatched-issues }}' | jq -r '.[] | "- [\(.key)](\(env.JIRA_URL)/browse/\(.key)): \(.fields.summary) (Status: \(.fields.status.name))"' >> release-report.md
+    fi
+    
+    cat release-report.md
+----
+
+== Advanced Configuration
+
+=== Timeout and Polling Strategy
+
+[source,yaml]
+----
+# Quick check for immediate feedback
+poll-interval-seconds: 10   # Check every 10 seconds
+timeout-minutes: 5         # Give up after 5 minutes
+
+# Long-running approval process
+poll-interval-seconds: 300  # Check every 5 minutes
+timeout-minutes: 1440      # Wait up to 24 hours
+
+# Very long release cycles
+poll-interval-seconds: 3600 # Check every hour
+timeout-minutes: 10080     # Wait up to a week
+----
+
+=== Conditional Logic Based on Results
+
+[source,yaml]
+----
+- name: Wait for approval
+  uses: ./jira-wait-for-status
+  id: approval
+  continue-on-error: true  # Don't fail workflow on timeout
+  with:
+    # ... configuration ...
+
+- name: Deploy if approved
+  if: steps.approval.outputs.result == 'success'
+  run: echo "Deploying to production..."
+
+- name: Deploy to staging if timeout
+  if: steps.approval.outputs.result == 'timeout'
+  run: echo "Approval timeout - deploying to staging only"
+
+- name: Handle errors
+  if: steps.approval.outputs.result == 'error'
+  run: |
+    echo "Error occurred during approval wait"
+    exit 1
+----
+
+== Polling Behavior
+
+The action polls Jira at regular intervals and provides detailed logging:
+
+```
+Poll #1 (0s elapsed)
+Time: 2024-01-15 14:30:00
+Found 3 issue(s) to check
+  ✅ PROJ-123: 'Approved' (matches target)
+  ⏳ PROJ-124: 'In Review' (waiting)
+  ⏳ PROJ-125: 'Pending' (waiting)
+
+Status: 1 matched, 2 waiting
+Waiting 30 seconds before next check...
+```
+
+=== Status Matching
+
+- **Exact match**: Status names must match exactly (case-sensitive)
+- **Multiple targets**: Use comma-separated list: `"Done,Closed,Resolved"`
+- **Any vs All**: Control whether any issue or all issues must match when using JQL
+
+=== Timeout Handling
+
+When timeout is reached:
+- Action sets `result` output to `'timeout'`
+- Provides final status summary
+- Can either fail the action or succeed based on `fail-on-timeout` setting
+- Returns partial results showing which issues matched
+
+== Error Handling
+
+The action handles various error scenarios:
+
+* **Authentication failures**: Invalid credentials
+* **Permission issues**: No access to project/issues
+* **Network problems**: API connectivity issues
+* **Issue not found**: Issue deleted or permissions changed
+* **Invalid JQL**: Malformed query syntax
+
+Common troubleshooting:
+
+* **"No issues found"**: Check JQL syntax and permissions
+* **"Status never changes"**: Verify target status names are exact matches
+* **"Frequent timeouts"**: Increase timeout or check if manual intervention is actually needed
+
+== Best Practices
+
+1. **Set appropriate timeouts**: Consider the actual time needed for manual processes
+2. **Use reasonable poll intervals**: Balance between responsiveness and API load
+3. **Handle timeouts gracefully**: Don't always fail the workflow on timeout
+4. **Provide clear issue descriptions**: Help approvers understand what they're approving
+5. **Monitor and alert**: Set up notifications for long-running waits
+6. **Use dry-run first**: Test your JQL queries and status names
+
+== Common Patterns
+
+=== Deployment Pipeline Gate
+```yaml
+Create approval issue → Wait for approval → Deploy → Update issue with results
+```
+
+=== Release Readiness Check
+```yaml
+Wait for all stories/bugs to be done → Generate release notes → Tag release
+```
+
+=== Testing Coordination
+```yaml
+Create test issues → Wait for completion → Aggregate results → Decision gate
+```
+
+=== Security Review Process
+```yaml
+Create security review → Wait for approval → Proceed with changes → Archive review
+```
+
+== Integration with Other Actions
+
+This action works well with the other Jira actions:
+
+```yaml
+# Full workflow example
+- uses: ./jira-create-issue       # Create approval issue
+- uses: ./jira-wait-for-status    # Wait for approval
+- uses: ./jira-update-issues      # Add deployment results
+- uses: ./jira-add-comment        # Add completion comment
+```
+
+== License
+
+This code is made available under the 
+link:https://opensource.org/license/mit/[MIT license].
+
+== References
+
+* link:https://confluence.atlassian.com/jirasoftwarecloud/advanced-searching-764478330.html[Jira JQL Documentation]
+* link:https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/[Jira Search API]
+* Learn more about link:https://docs.cloudbees.com/docs/cloudbees-saas-platform-actions/latest/[using actions in CloudBees workflows]. 
