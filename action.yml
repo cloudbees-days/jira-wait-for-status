@@ -1,7 +1,7 @@
 apiVersion: automation.cloudbees.io/v1alpha1
 kind: action
 name: jira-wait-for-status
-description: "Wait for Jira issue(s) to reach a target status with timeout and polling"
+description: "Wait for a Jira issue to reach specific status(es)"
 inputs:
   jira-url:
     description: "Jira instance URL (e.g., https://your-domain.atlassian.net)"
@@ -13,297 +13,42 @@ inputs:
     description: "Jira API token"
     required: true
   issue-key:
-    description: "Single issue key to wait for (e.g., PROJ-123). Mutually exclusive with jql."
-    required: false
-  jql:
-    description: "JQL query to find issues to wait for. Mutually exclusive with issue-key."
-    required: false
+    description: "Issue key to monitor"
+    required: true
   target-status:
-    description: 'Target status name(s) to wait for. Comma-separated for multiple valid statuses (e.g., "Done,Closed")'
+    description: "Comma-separated list of target statuses to wait for"
     required: true
   timeout-minutes:
-    description: "Maximum time to wait in minutes before timing out"
-    default: "60"
+    description: "Timeout in minutes"
+    default: "10"
     required: false
   poll-interval-seconds:
-    description: "How often to check status in seconds"
+    description: "Poll interval in seconds"
     default: "30"
-    required: false
-  all-issues-must-match:
-    description: "If using JQL, whether ALL issues must reach target status (true) or just ANY (false)"
-    default: "true"
-    required: false
-  fail-on-timeout:
-    description: "Whether to fail the action when timeout is reached (true) or exit successfully (false)"
-    default: "true"
     required: false
 
 outputs:
   result:
-    value: ${{ steps.wait-for-status.outputs.result }}
-    description: "Result of the wait: 'success', 'timeout', or 'error'"
-  matched-issues:
-    value: ${{ steps.wait-for-status.outputs.matched-issues }}
-    description: "JSON array of issues that reached the target status"
-  unmatched-issues:
-    value: ${{ steps.wait-for-status.outputs.unmatched-issues }}
-    description: "JSON array of issues that did not reach the target status"
-  total-wait-time:
-    value: ${{ steps.wait-for-status.outputs.total-wait-time }}
-    description: "Total time waited in seconds"
+    value: ${{ steps.wait-status.outputs.result }}
+    description: "Result of the wait operation (success or timeout)"
   final-status-summary:
-    value: ${{ steps.wait-for-status.outputs.final-status-summary }}
-    description: "Summary of final statuses for all monitored issues"
+    value: ${{ steps.wait-status.outputs.final-status-summary }}
+    description: "Final status of the issue"
 
 runs:
   using: composite
   steps:
-    - id: wait-for-status
-      name: Wait for Jira Status
-      uses: docker://alpine:3.22
-      shell: sh
+    - id: wait-status
+      name: Wait for Status Change
+      uses: docker://ldonleycb/jira-actions:latest
+      shell: bash
       run: |
-        set -e
-
-        # Install required tools
-        apk add --no-cache curl jq
-
-        # Validate inputs
-        if [ -z "${{ inputs.jira-url }}" ]; then
-          echo "Error: jira-url is required"
-          exit 1
-        fi
-
-        if [ -z "${{ inputs.jira-username }}" ]; then
-          echo "Error: jira-username is required"
-          exit 1
-        fi
-
-        if [ -z "${{ inputs.jira-token }}" ]; then
-          echo "Error: jira-token is required"
-          exit 1
-        fi
-
-        if [ -z "${{ inputs.target-status }}" ]; then
-          echo "Error: target-status is required"
-          exit 1
-        fi
-
-        # Validate that either issue-key or jql is provided, but not both
-        if [ -n "${{ inputs.issue-key }}" ] && [ -n "${{ inputs.jql }}" ]; then
-          echo "Error: Cannot specify both issue-key and jql. Use one or the other."
-          exit 1
-        fi
-
-        if [ -z "${{ inputs.issue-key }}" ] && [ -z "${{ inputs.jql }}" ]; then
-          echo "Error: Must specify either issue-key or jql"
-          exit 1
-        fi
-
-        # Clean up URL
-        JIRA_URL="${{ inputs.jira-url }}"
-        JIRA_URL="${JIRA_URL%/}"
-
-        # Parse target statuses into array
-        TARGET_STATUSES="${{ inputs.target-status }}"
-        echo "Target status(es): $TARGET_STATUSES"
-
-        # Convert comma-separated statuses to JSON array for easier processing
-        TARGET_STATUS_ARRAY=$(echo "$TARGET_STATUSES" | sed 's/,/\n/g' | jq -R . | jq -s .)
-        echo "Target status array: $TARGET_STATUS_ARRAY"
-
-        # Setup timeouts and intervals
-        TIMEOUT_MINUTES="${{ inputs.timeout-minutes }}"
-        POLL_INTERVAL_SECONDS="${{ inputs.poll-interval-seconds }}"
-        ALL_MUST_MATCH="${{ inputs.all-issues-must-match }}"
-        FAIL_ON_TIMEOUT="${{ inputs.fail-on-timeout }}"
-
-        TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
-        START_TIME=$(date +%s)
-
-        echo "Configuration:"
-        echo "  Timeout: $TIMEOUT_MINUTES minutes ($TIMEOUT_SECONDS seconds)"
-        echo "  Poll interval: $POLL_INTERVAL_SECONDS seconds"
-        echo "  All issues must match: $ALL_MUST_MATCH"
-        echo "  Fail on timeout: $FAIL_ON_TIMEOUT"
-
-        # Determine JQL to use
-        if [ -n "${{ inputs.issue-key }}" ]; then
-          JQL_QUERY="key = ${{ inputs.issue-key }}"
-          echo "Monitoring single issue: ${{ inputs.issue-key }}"
-        else
-          JQL_QUERY="${{ inputs.jql }}"
-          echo "Monitoring issues matching JQL: $JQL_QUERY"
-        fi
-
-        # Initialize tracking variables
-        MATCHED_ISSUES="[]"
-        UNMATCHED_ISSUES="[]"
-        ITERATION=0
-
-        echo ""
-        echo "Starting status monitoring..."
-        echo "=========================================="
-
-        while true; do
-          CURRENT_TIME=$(date +%s)
-          ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
-          ITERATION=$((ITERATION + 1))
-          
-          echo ""
-          echo "Poll #$ITERATION (${ELAPSED_TIME}s elapsed)"
-          echo "Time: $(date)"
-          
-          # Check if we've exceeded timeout
-          if [ $ELAPSED_TIME -ge $TIMEOUT_SECONDS ]; then
-            echo "⏰ Timeout reached after $ELAPSED_TIME seconds"
-            break
-          fi
-          
-          # Query issues
-          SEARCH_URL="${JIRA_URL}/rest/api/3/search"
-          QUERY_PARAMS="jql=$(echo "$JQL_QUERY" | sed 's/ /%20/g')&fields=key,summary,status&maxResults=100"
-          
-          SEARCH_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-            -X GET \
-            -H "Accept: application/json" \
-            -u "${{ inputs.jira-username }}:${{ inputs.jira-token }}" \
-            "${SEARCH_URL}?${QUERY_PARAMS}")
-          
-          SEARCH_HTTP_STATUS=$(echo "$SEARCH_RESPONSE" | tail -n1 | sed 's/.*HTTP_STATUS://')
-          SEARCH_RESPONSE_BODY=$(echo "$SEARCH_RESPONSE" | sed '$d')
-          
-          if [ "$SEARCH_HTTP_STATUS" -ne 200 ]; then
-            echo "❌ Error: Search request failed with status $SEARCH_HTTP_STATUS"
-            echo "Response: $SEARCH_RESPONSE_BODY"
-            echo "error" > "$CLOUDBEES_OUTPUTS/result"
-            echo "[]" > "$CLOUDBEES_OUTPUTS/matched-issues"
-            echo "[]" > "$CLOUDBEES_OUTPUTS/unmatched-issues"
-            echo "$ELAPSED_TIME" > "$CLOUDBEES_OUTPUTS/total-wait-time"
-            echo "Error occurred during polling" > "$CLOUDBEES_OUTPUTS/final-status-summary"
-            exit 1
-          fi
-          
-          CURRENT_ISSUES=$(echo "$SEARCH_RESPONSE_BODY" | jq -c '.issues')
-          ISSUE_COUNT=$(echo "$CURRENT_ISSUES" | jq 'length')
-          
-          echo "Found $ISSUE_COUNT issue(s) to check"
-          
-          if [ "$ISSUE_COUNT" -eq 0 ]; then
-            echo "⚠️  Warning: No issues found matching the query"
-            echo "This might mean:"
-            echo "  - Issues were deleted"
-            echo "  - JQL query no longer matches any issues"
-            echo "  - Permission changes"
-            continue
-          fi
-          
-          # Reset tracking for this iteration
-          CURRENT_MATCHED="[]"
-          CURRENT_UNMATCHED="[]"
-          
-          # Check each issue
-          echo "$CURRENT_ISSUES" | jq -c '.[]' | while read -r issue; do
-            ISSUE_KEY=$(echo "$issue" | jq -r '.key')
-            ISSUE_SUMMARY=$(echo "$issue" | jq -r '.fields.summary')
-            CURRENT_STATUS=$(echo "$issue" | jq -r '.fields.status.name')
-            
-            # Check if current status matches any target status
-            STATUS_MATCHES=$(echo "$TARGET_STATUS_ARRAY" | jq --arg status "$CURRENT_STATUS" 'map(. == $status) | any')
-            
-            if [ "$STATUS_MATCHES" = "true" ]; then
-              echo "  ✅ $ISSUE_KEY: '$CURRENT_STATUS' (matches target)"
-              echo "$CURRENT_MATCHED" | jq --argjson issue "$issue" '. + [$issue]' > /tmp/matched_$$.json
-              CURRENT_MATCHED=$(cat /tmp/matched_$$.json)
-            else
-              echo "  ⏳ $ISSUE_KEY: '$CURRENT_STATUS' (waiting)"
-              echo "$CURRENT_UNMATCHED" | jq --argjson issue "$issue" '. + [$issue]' > /tmp/unmatched_$$.json
-              CURRENT_UNMATCHED=$(cat /tmp/unmatched_$$.json)
-            fi
-          done
-          
-          # Read the results from temp files (to work around subshell issues)
-          if [ -f /tmp/matched_$$.json ]; then
-            MATCHED_ISSUES=$(cat /tmp/matched_$$.json)
-            rm -f /tmp/matched_$$.json
-          else
-            MATCHED_ISSUES="[]"
-          fi
-          
-          if [ -f /tmp/unmatched_$$.json ]; then
-            UNMATCHED_ISSUES=$(cat /tmp/unmatched_$$.json)
-            rm -f /tmp/unmatched_$$.json
-          else
-            UNMATCHED_ISSUES="[]"
-          fi
-          
-          MATCHED_COUNT=$(echo "$MATCHED_ISSUES" | jq 'length')
-          UNMATCHED_COUNT=$(echo "$UNMATCHED_ISSUES" | jq 'length')
-          
-          echo ""
-          echo "Status: $MATCHED_COUNT matched, $UNMATCHED_COUNT waiting"
-          
-          # Check completion conditions
-          if [ "$ALL_MUST_MATCH" = "true" ]; then
-            # All issues must match
-            if [ "$UNMATCHED_COUNT" -eq 0 ] && [ "$MATCHED_COUNT" -gt 0 ]; then
-              echo "🎉 Success! All issues have reached target status"
-              echo "success" > "$CLOUDBEES_OUTPUTS/result"
-              echo "$MATCHED_ISSUES" > "$CLOUDBEES_OUTPUTS/matched-issues"
-              echo "$UNMATCHED_ISSUES" > "$CLOUDBEES_OUTPUTS/unmatched-issues"
-              echo "$ELAPSED_TIME" > "$CLOUDBEES_OUTPUTS/total-wait-time"
-              echo "All $MATCHED_COUNT issue(s) reached target status" > "$CLOUDBEES_OUTPUTS/final-status-summary"
-              exit 0
-            fi
-          else
-            # Any issue matching is sufficient
-            if [ "$MATCHED_COUNT" -gt 0 ]; then
-              echo "🎉 Success! At least one issue has reached target status"
-              echo "success" > "$CLOUDBEES_OUTPUTS/result"
-              echo "$MATCHED_ISSUES" > "$CLOUDBEES_OUTPUTS/matched-issues"
-              echo "$UNMATCHED_ISSUES" > "$CLOUDBEES_OUTPUTS/unmatched-issues"
-              echo "$ELAPSED_TIME" > "$CLOUDBEES_OUTPUTS/total-wait-time"
-              echo "$MATCHED_COUNT of $ISSUE_COUNT issue(s) reached target status" > "$CLOUDBEES_OUTPUTS/final-status-summary"
-              exit 0
-            fi
-          fi
-          
-          # Wait before next poll
-          echo "Waiting $POLL_INTERVAL_SECONDS seconds before next check..."
-          sleep "$POLL_INTERVAL_SECONDS"
-        done
-
-        # Handle timeout
-        FINAL_TIME=$(date +%s)
-        TOTAL_WAIT_TIME=$((FINAL_TIME - START_TIME))
-        MATCHED_COUNT=$(echo "$MATCHED_ISSUES" | jq 'length')
-        UNMATCHED_COUNT=$(echo "$UNMATCHED_ISSUES" | jq 'length')
-
-        echo ""
-        echo "=========================================="
-        echo "⏰ Timeout reached after $TOTAL_WAIT_TIME seconds"
-        echo "Final status: $MATCHED_COUNT matched, $UNMATCHED_COUNT still waiting"
-
-        if [ "$UNMATCHED_COUNT" -gt 0 ]; then
-          echo ""
-          echo "Issues still waiting:"
-          echo "$UNMATCHED_ISSUES" | jq -r '.[] | "  - \(.key): \(.fields.status.name)"'
-        fi
-
-        # Set outputs
-        echo "timeout" > "$CLOUDBEES_OUTPUTS/result"
-        echo "$MATCHED_ISSUES" > "$CLOUDBEES_OUTPUTS/matched-issues"
-        echo "$UNMATCHED_ISSUES" > "$CLOUDBEES_OUTPUTS/unmatched-issues"
-        echo "$TOTAL_WAIT_TIME" > "$CLOUDBEES_OUTPUTS/total-wait-time"
-        echo "Timeout: $MATCHED_COUNT matched, $UNMATCHED_COUNT waiting after ${TIMEOUT_MINUTES}min" > "$CLOUDBEES_OUTPUTS/final-status-summary"
-
-        # Exit based on fail-on-timeout setting
-        if [ "$FAIL_ON_TIMEOUT" = "true" ]; then
-          echo ""
-          echo "❌ Action failed due to timeout"
-          exit 1
-        else
-          echo ""
-          echo "⚠️  Timeout reached but action configured to succeed"
-          exit 0
-        fi
+        /app/jira-actions wait-for-status \
+          --url "${{ inputs.jira-url }}" \
+          --username "${{ inputs.jira-username }}" \
+          --token "${{ inputs.jira-token }}" \
+          --issue-key "${{ inputs.issue-key }}" \
+          --target-status "${{ inputs.target-status }}" \
+          --timeout-minutes "${{ inputs.timeout-minutes }}" \
+          --poll-interval-seconds "${{ inputs.poll-interval-seconds }}" \
+          --verbose
