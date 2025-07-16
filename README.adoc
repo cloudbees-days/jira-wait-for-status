@@ -30,42 +30,25 @@ Use this action to wait for Jira issue(s) to reach a target status with configur
 
 | `issue-key`
 | String
-| No*
-| Single issue key to wait for (e.g., `PROJ-123`). Mutually exclusive with `jql`.
-
-| `jql`
-| String
-| No*
-| JQL query to find issues to wait for. Mutually exclusive with `issue-key`.
+| Yes
+| Issue key to monitor (e.g., `PROJ-123`)
 
 | `target-status`
 | String
 | Yes
-| Target status name(s) to wait for. Comma-separated for multiple valid statuses (e.g., `"Done,Closed"`)
+| Comma-separated list of target statuses to wait for (e.g., `"Done,Closed"`)
 
 | `timeout-minutes`
 | Number
 | No
-| Maximum time to wait in minutes before timing out. Default is `60`
+| Timeout in minutes. Default is `10`
 
 | `poll-interval-seconds`
 | Number
 | No
-| How often to check status in seconds. Default is `30`
-
-| `all-issues-must-match`
-| Boolean
-| No
-| If using JQL, whether ALL issues must reach target status (`true`) or just ANY (`false`). Default is `true`
-
-| `fail-on-timeout`
-| Boolean
-| No
-| Whether to fail the action when timeout is reached (`true`) or exit successfully (`false`). Default is `true`
+| Poll interval in seconds. Default is `30`
 
 |===
-
-*Either `issue-key` OR `jql` must be provided, but not both.
 
 == Outputs
 
@@ -79,23 +62,11 @@ Use this action to wait for Jira issue(s) to reach a target status with configur
 
 | `result`
 | String
-| Result of the wait: `'success'`, `'timeout'`, or `'error'`
-
-| `matched-issues`
-| JSON Array
-| Array of issues that reached the target status
-
-| `unmatched-issues`
-| JSON Array
-| Array of issues that did not reach the target status
-
-| `total-wait-time`
-| Number
-| Total time waited in seconds
+| Result of the wait operation (success or timeout)
 
 | `final-status-summary`
 | String
-| Human-readable summary of final statuses for all monitored issues
+| Final status of the issue
 
 |===
 
