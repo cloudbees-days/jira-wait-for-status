@@ -41,7 +41,7 @@ runs:
     - id: wait-status
       name: Wait for Status Change
       uses: docker://ldonleycb/jira-actions:latest
-      shell: bash
+      shell: sh
       run: |
         /app/jira-actions wait-for-status \
           --url "${{ inputs.jira-url }}" \
