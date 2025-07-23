@@ -86,7 +86,7 @@ Use this action to wait for a Jira issue to reach a target status with configura
     project-key: OPS
     issue-type: Task
     issue-fields: |
-      summary: "Approve deployment of ${{ github.ref_name }} to production"
+      summary: "Approve deployment of ${{ cloudbees.scm.ref_name }} to production"
       description: "Please review and approve this deployment."
       priority:
         name: High
@@ -122,7 +122,7 @@ Use this action to wait for a Jira issue to reach a target status with configura
     project-key: SEC
     issue-type: "Security Review"
     issue-fields: |
-      summary: "Security review for ${{ github.repository }} v${{ github.ref_name }}"
+      summary: "Security review for ${{ cloudbees.scm.repository }} v${{ cloudbees.scm.ref_name }}"
       description: "Security review required for production deployment."
       priority:
         name: High
