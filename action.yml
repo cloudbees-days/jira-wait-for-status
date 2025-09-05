@@ -40,7 +40,7 @@ runs:
   steps:
     - id: wait-status
       name: Wait for Status Change
-      uses: docker://ldonleycb/jira-actions:latest
+      uses: docker://cloudbeesdemo/jira-actions:latest
       shell: sh
       run: |
         /app/jira-actions wait-for-status \
